@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import {
   auth,
   onAuthStateChanged,
@@ -41,6 +41,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserRecord | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const inFlightProfileRef = useRef<Promise<UserRecord | null> | null>(null);
 
   const fetchProfile = async (explicitToken?: string): Promise<UserRecord | null> => {
     if (explicitToken) {
@@ -52,27 +53,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return null;
     }
 
-    try {
-      const p = await api.getProfile();
-      setProfile(p);
-      return p;
-    } catch (err: any) {
-      const status = err?.status;
-      // Only clear token if backend explicitly rejected authentication with HTTP 401
-      if (status === 401) {
-        console.warn('Authentication token rejected by backend (HTTP 401).');
-        const tok = getStoredToken();
-        if (tok && !tok.startsWith('test-token-') && !tok.startsWith('mock-')) {
-          setAuthToken(null);
-        }
-        setProfile(null);
-      } else {
-        // Network or server error (e.g. 500, gateway timeout, offline):
-        // Preserve session and stored token to avoid silent logouts on temporary network glitches
-        console.warn('Network or server error loading profile; preserving session:', err?.message || err);
-      }
-      throw err;
+    if (inFlightProfileRef.current) {
+      return inFlightProfileRef.current;
     }
+
+    const pPromise = (async () => {
+      try {
+        const p = await api.getProfile(explicitToken);
+        setProfile(p);
+        return p;
+      } catch (err: any) {
+        const status = err?.status;
+        // Only clear token if backend explicitly rejected authentication with HTTP 401
+        if (status === 401) {
+          console.warn('Authentication token rejected by backend (HTTP 401).');
+          const tok = getStoredToken();
+          if (tok && !tok.startsWith('test-token-') && !tok.startsWith('mock-')) {
+            setAuthToken(null);
+          }
+          setProfile(null);
+        } else {
+          // Network or server error (e.g. 500, gateway timeout, offline):
+          // Preserve session and stored token to avoid silent logouts on temporary network glitches
+          console.warn('Network or server error loading profile; preserving session:', err?.message || err);
+        }
+        throw err;
+      } finally {
+        inFlightProfileRef.current = null;
+      }
+    })();
+
+    inFlightProfileRef.current = pPromise;
+    return pPromise;
   };
 
   useEffect(() => {
@@ -80,6 +92,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Use onIdTokenChanged to handle token refresh and auth state changes
     if (typeof window !== 'undefined' && auth) {
+      if (typeof auth.authStateReady === 'function') {
+        auth.authStateReady().then(() => {
+          if (isMounted) setLoading(false);
+        });
+      }
+
       const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
         if (!isMounted) return;
         if (fbUser) {
@@ -90,7 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setAuthToken(idToken);
             if (isMounted) {
               await fetchProfile(idToken).catch((e) => {
-                console.warn('Initial profile fetch failed on auth change:', e?.message || e);
+                console.warn('Profile fetch on auth state change:', e?.message || e);
               });
             }
           } catch (e) {

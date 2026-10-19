@@ -145,46 +145,126 @@ def verify_id_token(token: str) -> AuthenticatedUser:
     decoded_token = None
     verification_error = None
 
-    # Strategy 1: Standard Firebase Admin SDK verification (when credentials or ADC are configured)
+    import base64
+    import json
+    import time
+
+    unverified_claims = {}
+    unverified_header = {}
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            p0 = parts[0] + "=" * (-len(parts[0]) % 4)
+            p1 = parts[1] + "=" * (-len(parts[1]) % 4)
+            unverified_header = json.loads(base64.urlsafe_b64decode(p0).decode("utf-8"))
+            unverified_claims = json.loads(base64.urlsafe_b64decode(p1).decode("utf-8"))
+    except Exception as parse_err:
+        logger.debug("Could not extract unverified JWT claims: %s", parse_err)
+
+    # Pre-validation diagnostic checks (Safe: logs metadata only, never raw credentials)
+    now = int(time.time())
+    token_exp = unverified_claims.get("exp")
+    token_iat = unverified_claims.get("iat")
+    token_aud = unverified_claims.get("aud")
+    token_iss = unverified_claims.get("iss")
+    configured_project = settings.firebase_project_id.strip().strip('"').strip("'")
+
+    if token_exp and (now - 60) > token_exp:
+        expired_secs = now - token_exp
+        logger.warning(
+            "Firebase token expired: expired_at=%s, current_time=%s, expired %d seconds ago",
+            token_exp, now, expired_secs
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: token expired {expired_secs} seconds ago.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if token_iat and (token_iat - 60) > now:
+        logger.warning(
+            "Firebase token issued in future (possible clock skew): token_iat=%s, current_time=%s",
+            token_iat, now
+        )
+
+    # Strictly enforce that the token audience and issuer match the configured project
+    expected_issuer = f"https://securetoken.google.com/{configured_project}"
+    if token_aud and token_aud != configured_project:
+        logger.warning(
+            "Security rejection: Token audience '%s' does not match configured project '%s'",
+            token_aud, configured_project
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: token audience mismatch (expected {configured_project}).",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if token_iss and token_iss != expected_issuer:
+        logger.warning(
+            "Security rejection: Token issuer '%s' does not match expected '%s'",
+            token_iss, expected_issuer
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: invalid token issuer.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Strategy 1: Standard Firebase Admin SDK verification (when credentials / ADC are present)
     try:
         from firebase_admin import auth
-        decoded_token = auth.verify_id_token(token, check_revoked=False, clock_skew_seconds=10)
+        decoded_token = auth.verify_id_token(token, check_revoked=False, clock_skew_seconds=60)
+        logger.debug("Firebase Admin Strategy 1 succeeded")
     except Exception as e:
         verification_error = e
-        logger.debug("Firebase Admin standard verify_id_token skipped/failed: %s", type(e).__name__)
+        logger.debug("Firebase Admin standard verify_id_token skipped/failed: %s (%s)", type(e).__name__, e)
 
-    # Strategy 2: Firebase Admin SDK internal TokenVerifier with Google's public certs (RS256, audience, issuer, expiry)
+    # Strategy 2: Firebase Admin SDK internal TokenVerifier using Google public certs
     if decoded_token is None:
         try:
             import firebase_admin
             from firebase_admin import _token_gen
             app = firebase_admin.get_app() if firebase_admin._apps else firebase_admin.initialize_app(
-                options={"projectId": settings.firebase_project_id}
+                options={"projectId": configured_project}
             )
             verifier = _token_gen.TokenVerifier(app)
-            decoded_token = verifier.verify_id_token(token, clock_skew_seconds=10)
+            decoded_token = verifier.verify_id_token(token, clock_skew_seconds=60)
+            logger.debug("Firebase TokenVerifier Strategy 2 succeeded")
         except Exception as e:
             verification_error = e
-            logger.debug("Firebase TokenVerifier failed: %s", type(e).__name__)
+            logger.debug("Firebase TokenVerifier Strategy 2 failed: %s (%s)", type(e).__name__, e)
 
-    # Strategy 3: Google OAuth2 ID Token Verification (official Google Auth library)
+    # Strategy 3: Google Auth ID Token Verification (standalone cryptographic public cert verification)
     if decoded_token is None:
         try:
             from google.oauth2 import id_token as google_id_token
             from google.auth.transport import requests as google_requests
-            decoded_token = google_id_token.verify_firebase_token(
+            certs_url = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+            decoded_token = google_id_token.verify_token(
                 token,
                 request=google_requests.Request(),
-                audience=settings.firebase_project_id,
-                clock_skew_in_seconds=10,
+                audience=configured_project,
+                certs_url=certs_url,
+                clock_skew_in_seconds=60,
             )
+            # Strictly verify issuer matches configured project
+            actual_iss = decoded_token.get("iss")
+            if actual_iss != expected_issuer:
+                logger.warning("Strategy 3 token issuer '%s' != expected '%s'", actual_iss, expected_issuer)
+                decoded_token = None
+            else:
+                logger.debug("Google OAuth2 ID Token Strategy 3 succeeded")
         except Exception as e:
             verification_error = e
-            logger.debug("google.oauth2.id_token.verify_firebase_token failed: %s", type(e).__name__)
+            logger.debug("Google ID Token Strategy 3 failed: %s (%s)", type(e).__name__, e)
 
     if not decoded_token:
-        # Never log raw token contents for security
-        logger.warning("Token verification failed: %s: %s", type(verification_error).__name__, verification_error)
+        # Safe diagnostic logging: logs type and description, never credentials or secret values
+        logger.warning(
+            "Token verification failed across all strategies: error=%s (%s), aud=%s, configured_proj=%s",
+            type(verification_error).__name__, verification_error, token_aud, configured_project
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed: invalid or expired token.",

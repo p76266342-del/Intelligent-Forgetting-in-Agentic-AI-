@@ -237,16 +237,25 @@ export const getStoredToken = (): string | null => {
  * Ensures a valid, current token is acquired before protected requests.
  * Uses Firebase authenticated user's getIdToken() if available to avoid expired or stale tokens.
  */
-export async function getValidToken(): Promise<string | null> {
-  if (typeof window !== 'undefined' && auth?.currentUser) {
-    try {
-      const freshToken = await auth.currentUser.getIdToken();
-      if (freshToken) {
-        setAuthToken(freshToken);
-        return freshToken;
+export async function getValidToken(forceRefresh: boolean = false): Promise<string | null> {
+  if (typeof window !== 'undefined' && auth) {
+    if (typeof auth.authStateReady === 'function') {
+      try {
+        await auth.authStateReady();
+      } catch {
+        // Continue with available state
       }
-    } catch {
-      // Fallback to stored token if offline or getIdToken fails
+    }
+    if (auth.currentUser) {
+      try {
+        const freshToken = await auth.currentUser.getIdToken(forceRefresh);
+        if (freshToken) {
+          setAuthToken(freshToken);
+          return freshToken;
+        }
+      } catch (err) {
+        console.warn('Failed to obtain ID token from auth.currentUser:', err);
+      }
     }
   }
   return getStoredToken();
@@ -301,7 +310,11 @@ export const api = {
   getReadiness: () => apiRequest<{ status: string; ready: boolean }>('/api/v1/health/ready'),
 
   // Profile & Self
-  getProfile: () => apiRequest<UserRecord>('/api/v1/me'),
+  getProfile: (explicitToken?: string) =>
+    apiRequest<UserRecord>(
+      '/api/v1/me',
+      explicitToken ? { headers: { Authorization: `Bearer ${explicitToken}` } } : {}
+    ),
   updateProfile: (data: { display_name?: string; metadata?: Record<string, any> }) =>
     apiRequest<UserRecord>('/api/v1/me/profile', { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: () => apiRequest<{ status: string; message: string; purged_records: any }>('/api/v1/me', { method: 'DELETE' }),

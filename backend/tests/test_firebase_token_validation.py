@@ -112,3 +112,89 @@ def test_patch_profile_updates_display_name_with_token():
     data = res.json()
     assert data["display_name"] == "Updated Name"
     assert data["metadata"].get("theme") == "dark"
+
+
+def _make_jwt(claims: dict, header: dict = None) -> str:
+    import base64
+    import json
+    h = header or {"alg": "RS256", "kid": "key123", "typ": "JWT"}
+    p0 = base64.urlsafe_b64encode(json.dumps(h).encode()).decode().rstrip("=")
+    p1 = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"{p0}.{p1}.fake_signature"
+
+
+def test_expired_firebase_token_raises_401():
+    """Verify that an expired Firebase token raises HTTP 401 with explicit expired message."""
+    import time
+    past_time = int(time.time()) - 3600
+    claims = {
+        "sub": "user_expired_1",
+        "aud": "intelligent-forgetting",
+        "iss": "https://securetoken.google.com/intelligent-forgetting",
+        "exp": past_time,
+        "iat": past_time - 3600,
+    }
+    jwt_token = _make_jwt(claims)
+    with pytest.raises(HTTPException) as exc_info:
+        verify_id_token(jwt_token)
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "token expired" in exc_info.value.detail.lower()
+
+
+def test_wrong_project_firebase_token_rejected():
+    """Verify that a token with wrong project audience and mismatched issuer is rejected with 401."""
+    import time
+    now = int(time.time())
+    claims = {
+        "sub": "user_wrong_proj",
+        "aud": "malicious-foreign-project",
+        "iss": "https://rogue-issuer.com/auth",
+        "exp": now + 3600,
+        "iat": now,
+    }
+    jwt_token = _make_jwt(claims)
+    with pytest.raises(HTTPException) as exc_info:
+        verify_id_token(jwt_token)
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_mismatched_audience_strictly_rejected():
+    """Verify that any token with a foreign audience is strictly rejected with 401."""
+    import time
+    now = int(time.time())
+    claims = {
+        "sub": "user_other_proj",
+        "aud": "some-other-firebase-project",
+        "iss": "https://securetoken.google.com/some-other-firebase-project",
+        "exp": now + 3600,
+        "iat": now,
+    }
+    jwt_token = _make_jwt(claims)
+    with pytest.raises(HTTPException) as exc_info:
+        verify_id_token(jwt_token)
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "token audience mismatch" in exc_info.value.detail
+
+
+def test_valid_firebase_token_for_configured_project():
+    """Verify that a valid token strictly matching the configured project successfully authenticates."""
+    import time
+    now = int(time.time())
+    claims = {
+        "sub": "valid_user_789",
+        "email": "user789@example.com",
+        "name": "Valid User",
+        "aud": "intelligent-forgetting",
+        "iss": "https://securetoken.google.com/intelligent-forgetting",
+        "exp": now + 3600,
+        "iat": now,
+    }
+    jwt_token = _make_jwt(claims)
+
+    with patch("google.oauth2.id_token.verify_token", return_value=claims):
+        user = verify_id_token(jwt_token)
+        assert isinstance(user, AuthenticatedUser)
+        assert user.uid == "valid_user_789"
+        assert user.email == "user789@example.com"
+        assert user.name == "Valid User"
+

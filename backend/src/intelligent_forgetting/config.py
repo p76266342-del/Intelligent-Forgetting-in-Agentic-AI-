@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -39,10 +39,31 @@ class Settings(BaseSettings):
     )
 
     # Firebase Authentication
-    firebase_project_id: str = Field(default="intelligent-forgetting", description="Firebase project ID")
-    firebase_auth_domain: str = Field(default="intelligent-forgetting.firebaseapp.com", description="Firebase auth domain")
-    firebase_storage_bucket: str = Field(default="intelligent-forgetting.firebasestorage.app", description="Firebase storage bucket")
-    firebase_api_key: Optional[str] = Field(default=None, description="Firebase Web API key")
+    firebase_project_id: str = Field(
+        default="intelligent-forgetting",
+        validation_alias=AliasChoices(
+            "FIREBASE_PROJECT_ID",
+            "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+            "GCP_PROJECT",
+        ),
+        description="Firebase project ID",
+    )
+    firebase_auth_domain: str = Field(
+        default="intelligent-forgetting.firebaseapp.com",
+        validation_alias=AliasChoices("FIREBASE_AUTH_DOMAIN", "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN"),
+        description="Firebase auth domain",
+    )
+    firebase_storage_bucket: str = Field(
+        default="intelligent-forgetting.firebasestorage.app",
+        validation_alias=AliasChoices("FIREBASE_STORAGE_BUCKET", "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET"),
+        description="Firebase storage bucket",
+    )
+    firebase_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("FIREBASE_API_KEY", "NEXT_PUBLIC_FIREBASE_API_KEY"),
+        description="Firebase Web API key",
+    )
     firebase_service_account_path: Optional[str] = Field(default=None, description="Path to Firebase Admin SDK service account JSON")
     firebase_service_account_json: Optional[str] = Field(default=None, description="Firebase service account JSON string or base64")
 
@@ -144,6 +165,13 @@ class Settings(BaseSettings):
                 f"archive_threshold ({v}) must be greater than or equal to forget_threshold ({forget_val})"
             )
         return v
+
+    @field_validator("firebase_project_id", mode="before")
+    @classmethod
+    def clean_firebase_project_id(cls, v: Any) -> str:
+        if isinstance(v, str):
+            return v.strip().strip('"').strip("'")
+        return str(v) if v is not None else "intelligent-forgetting"
 
     def resolved_database_path(self) -> Path:
         """Returns the resolved absolute path to the database, ensuring parent directory exists."""

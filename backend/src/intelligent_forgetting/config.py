@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", description="Environment mode: development, staging, production")
     app_secret_key: str = Field(default="dev-secret-key-change-in-production", description="Secret key for signing sessions")
     cors_allowed_origins: str = Field(
-        default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173",
+        default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://intelligent-forgetting-frontend.onrender.com,http://intelligent-forgetting-frontend.onrender.com",
         description="Comma-separated allowed CORS origins",
     )
 
@@ -183,18 +183,25 @@ class Settings(BaseSettings):
 
     def get_cors_origins(self) -> List[str]:
         """Returns parsed list of allowed CORS origins, formatting scheme-less hosts (e.g. from Render property: host)."""
-        if not self.cors_allowed_origins:
-            return ["*"]
-        origins: List[str] = []
-        for o in self.cors_allowed_origins.split(","):
-            cleaned = o.strip()
-            if not cleaned:
-                continue
-            origins.append(cleaned)
-            # If origin was provided as a bare host without scheme (e.g., from Render property: host)
-            if not cleaned.startswith("http://") and not cleaned.startswith("https://") and cleaned != "*":
-                origins.append(f"https://{cleaned}")
-                origins.append(f"http://{cleaned}")
+        base_origins = [
+            "https://intelligent-forgetting-frontend.onrender.com",
+            "http://intelligent-forgetting-frontend.onrender.com",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+        origins: List[str] = list(base_origins)
+        if self.cors_allowed_origins:
+            for o in self.cors_allowed_origins.split(","):
+                cleaned = o.strip().rstrip("/").strip('"').strip("'")
+                if not cleaned:
+                    continue
+                origins.append(cleaned)
+                # If origin was provided as a bare host without scheme (e.g., from Render property: host)
+                if not cleaned.startswith("http://") and not cleaned.startswith("https://") and cleaned != "*":
+                    origins.append(f"https://{cleaned}")
+                    origins.append(f"http://{cleaned}")
         return list(dict.fromkeys(origins))
 
 

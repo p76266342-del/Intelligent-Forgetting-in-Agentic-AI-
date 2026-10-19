@@ -59,16 +59,16 @@ export default function AdminPage() {
   const loadData = async () => {
     setIsLoading(true);
     try {
-      const [ov, uList, expList, logs] = await Promise.all([
+      const [ovRes, uListRes, expListRes, logsRes] = await Promise.allSettled([
         api.getAdminOverview(),
         api.listAdminUsers(),
         api.listRLExperiments(),
         api.getAuditLogs(),
       ]);
-      setOverview(ov);
-      setUsers(uList);
-      setExperiments(expList);
-      setAuditLogs(logs);
+      if (ovRes.status === 'fulfilled') setOverview(ovRes.value);
+      if (uListRes.status === 'fulfilled') setUsers(uListRes.value);
+      if (expListRes.status === 'fulfilled') setExperiments(expListRes.value);
+      if (logsRes.status === 'fulfilled') setAuditLogs(logsRes.value);
     } catch (err) {
       console.error('Failed to load admin telemetry:', err);
     } finally {

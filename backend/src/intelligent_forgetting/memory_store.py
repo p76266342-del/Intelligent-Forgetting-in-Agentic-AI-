@@ -37,13 +37,16 @@ class CompatCursor:
         if self._is_postgres and params is not None:
             sql = sql.replace("?", "%s")
         if params is not None:
-            return self._cursor.execute(sql, params)
-        return self._cursor.execute(sql)
+            self._cursor.execute(sql, params)
+        else:
+            self._cursor.execute(sql)
+        return self
 
     def executemany(self, sql: str, seq_of_params: Any):
         if self._is_postgres:
             sql = sql.replace("?", "%s")
-        return self._cursor.executemany(sql, seq_of_params)
+        self._cursor.executemany(sql, seq_of_params)
+        return self
 
     def fetchone(self):
         return self._cursor.fetchone()
@@ -58,8 +61,19 @@ class CompatCursor:
     def rowcount(self):
         return self._cursor.rowcount
 
+    @property
+    def description(self):
+        return self._cursor.description
+
     def __iter__(self):
         return iter(self._cursor)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self._cursor, "__exit__"):
+            return self._cursor.__exit__(exc_type, exc_val, exc_tb)
 
 
 class PGConnectionWrapper:
@@ -1251,8 +1265,18 @@ class MemoryStore:
                     total_score += float(r["retention_score"])
                     scored_count += 1
 
-            db_file = Path(self.db_path)
-            size_bytes = db_file.stat().st_size if db_file.exists() else 0
+            size_bytes = 0
+            if self.is_postgres:
+                try:
+                    cursor.execute("SELECT pg_database_size(current_database());")
+                    sz_row = cursor.fetchone()
+                    if sz_row:
+                        size_bytes = int(sz_row[0])
+                except Exception:
+                    size_bytes = 0
+            else:
+                db_file = Path(self.db_path)
+                size_bytes = db_file.stat().st_size if db_file.exists() else 0
 
             return MemoryStats(
                 total_memories=total,
@@ -1321,6 +1345,78 @@ class MemoryStore:
                 last_active_at=datetime.fromisoformat(row["last_active_at"]),
                 metadata=json.loads(row["metadata"]) if row["metadata"] else {},
             )
+
+    def sync_firebase_users(self, max_users: int = 1000) -> int:
+        """Synchronizes real registered user accounts from Firebase Authentication into the persistent database.
+        
+        Reads real Firebase Auth user records and safely upserts them into the PostgreSQL/SQLite users table,
+        preserving tenant isolation and role/status claims without inventing synthetic data.
+        Does not overwrite existing administrative privileges or local account status overrides.
+        """
+        try:
+            import firebase_admin
+            from firebase_admin import auth
+            if not firebase_admin._apps:
+                from intelligent_forgetting.auth import initialize_firebase
+                initialize_firebase()
+            if not firebase_admin._apps:
+                return 0
+
+            page = auth.list_users(max_results=min(max_users, 1000))
+            synced_count = 0
+            for fb_user in page.iterate_all():
+                if synced_count >= max_users:
+                    break
+                try:
+                    custom_claims = fb_user.custom_claims or {}
+                    # Preserve existing role and status if record already exists in database
+                    existing = self.get_user(fb_user.uid)
+                    
+                    if existing:
+                        # Retain existing role if it has admin privileges, unless explicitly granted in claims
+                        role = existing.role
+                        if custom_claims.get("role") == "admin" or custom_claims.get("admin") is True or fb_user.email == "admin@intelligentforgetting.org":
+                            role = "admin"
+                        # Retain existing status if locally modified (e.g. deactivated by admin)
+                        status_val = existing.status if not fb_user.disabled else "disabled"
+                    else:
+                        role = custom_claims.get("role", "admin" if (custom_claims.get("admin") or fb_user.email == "admin@intelligentforgetting.org") else "user")
+                        status_val = "disabled" if fb_user.disabled else "active"
+
+                    created_at = utc_now()
+                    if fb_user.user_metadata and fb_user.user_metadata.creation_timestamp:
+                        try:
+                            created_at = datetime.fromtimestamp(fb_user.user_metadata.creation_timestamp / 1000, tz=timezone.utc)
+                        except Exception:
+                            pass
+
+                    last_active_at = created_at
+                    if fb_user.user_metadata and fb_user.user_metadata.last_sign_in_timestamp:
+                        try:
+                            last_active_at = datetime.fromtimestamp(fb_user.user_metadata.last_sign_in_timestamp / 1000, tz=timezone.utc)
+                        except Exception:
+                            pass
+
+                    rec = UserRecord(
+                        uid=fb_user.uid,
+                        email=fb_user.email,
+                        display_name=fb_user.display_name or (fb_user.email.split("@")[0] if fb_user.email else "User"),
+                        role=role,
+                        status=status_val,
+                        created_at=created_at,
+                        last_active_at=last_active_at,
+                        metadata={"provider_data": [p.provider_id for p in fb_user.provider_data] if fb_user.provider_data else []},
+                    )
+                    self.upsert_user(rec)
+                    synced_count += 1
+                except Exception as user_err:
+                    logger.warning("Error synchronizing individual Firebase user %s: %s", getattr(fb_user, "uid", "unknown"), user_err)
+                    continue
+
+            return synced_count
+        except Exception as e:
+            logger.debug("Firebase auth user synchronization skipped/failed: %s", e)
+            return 0
 
     def list_users(self, limit: int = 100, offset: int = 0, search: Optional[str] = None) -> List[UserRecord]:
         """Lists users with optional search."""

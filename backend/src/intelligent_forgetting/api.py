@@ -1246,6 +1246,7 @@ def apply_forgetting(
 @app.get("/api/v1/admin/overview", tags=["Admin"])
 def get_admin_overview(admin_user: AuthenticatedUser = Depends(get_current_admin_user)):
     """Provides high-level system metrics across users, conversations, memories, and services."""
+    store.sync_firebase_users()
     users = store.list_users(limit=1000)
     stats = store.get_stats()
     return {
@@ -1285,6 +1286,7 @@ def list_admin_users(
     admin_user: AuthenticatedUser = Depends(get_current_admin_user),
 ):
     """Administrative user management: search and inspect user profiles."""
+    store.sync_firebase_users()
     return store.list_users(limit=limit, offset=offset, search=search)
 
 
@@ -1298,6 +1300,11 @@ def update_user_status(
     updated = store.update_user_status(user_id, status=status_val, actor_uid=admin_user.uid)
     if not updated:
         raise HTTPException(status_code=404, detail="User not found.")
+    try:
+        from firebase_admin import auth
+        auth.update_user(user_id, disabled=(status_val == "disabled"))
+    except Exception as e:
+        logger.debug("Could not sync user disabled status to Firebase Auth: %s", e)
     return updated
 
 
@@ -1313,6 +1320,12 @@ def update_user_role(
         raise HTTPException(status_code=404, detail="User not found.")
     if role_val == "admin":
         provision_admin_user(user_id)
+    else:
+        try:
+            from firebase_admin import auth
+            auth.set_custom_user_claims(user_id, {"role": "user", "admin": False})
+        except Exception as e:
+            logger.debug("Could not sync user role to Firebase Auth: %s", e)
     return updated
 
 

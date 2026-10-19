@@ -181,9 +181,24 @@ export interface UserMemoryStats {
   storage_size_bytes: number;
 }
 
-const getApiBaseUrl = (): string => {
-  if (typeof process !== 'undefined' && process.env.NEXT_PUBLIC_API_BASE_URL) {
-    return process.env.NEXT_PUBLIC_API_BASE_URL.replace(/\/$/, '');
+export const getApiBaseUrl = (): string => {
+  if (typeof process !== 'undefined') {
+    let url = process.env.NEXT_PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_URL;
+    if (url) {
+      url = url.trim().replace(/\/$/, '');
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = `https://${url}`;
+      }
+      // If configured with trailing /api/v1 or /api, strip it so baseUrl is the pure host origin
+      url = url.replace(/\/api\/v1\/?$/, '').replace(/\/api\/?$/, '');
+      return url;
+    }
+  }
+  // Client-side fallback if env vars missing in browser runtime
+  if (typeof window !== 'undefined' && window.location) {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      return 'http://127.0.0.1:8000';
+    }
   }
   return 'http://127.0.0.1:8000';
 };
@@ -247,7 +262,16 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
   }
 
   const baseUrl = getApiBaseUrl();
-  const url = endpoint.startsWith('http') ? endpoint : `${baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+  let path = endpoint;
+  if (!path.startsWith('http')) {
+    if (!path.startsWith('/')) {
+      path = `/${path}`;
+    }
+    // Prevent accidental duplication: e.g. /api/v1/api/v1/me -> /api/v1/me
+    path = path.replace(/^\/api\/v1\/api\/v1\//, '/api/v1/');
+  }
+
+  const url = path.startsWith('http') ? path : `${baseUrl}${path}`;
 
   const response = await fetch(url, { cache: 'no-store', ...options, headers });
   if (!response.ok) {

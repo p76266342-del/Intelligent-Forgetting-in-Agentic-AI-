@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,13 +24,18 @@ class Settings(BaseSettings):
     )
 
     # Server configuration
-    api_host: str = Field(default="127.0.0.1", description="FastAPI host address.")
-    api_port: int = Field(default=8000, description="FastAPI port.")
+    api_host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("API_HOST", "HOST"), description="FastAPI host address.")
+    api_port: int = Field(default=8000, validation_alias=AliasChoices("API_PORT", "PORT"), description="FastAPI port.")
 
     # Persistence
     database_path: str = Field(
         default="data/memories.db",
         description="Path to SQLite database file.",
+    )
+    database_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "DATABASE_URI"),
+        description="Optional PostgreSQL database connection URL (e.g. postgresql://user:pass@host:5432/dbname)",
     )
 
     # Firebase Authentication
@@ -39,6 +44,7 @@ class Settings(BaseSettings):
     firebase_storage_bucket: str = Field(default="intelligent-forgetting.firebasestorage.app", description="Firebase storage bucket")
     firebase_api_key: Optional[str] = Field(default=None, description="Firebase Web API key")
     firebase_service_account_path: Optional[str] = Field(default=None, description="Path to Firebase Admin SDK service account JSON")
+    firebase_service_account_json: Optional[str] = Field(default=None, description="Firebase service account JSON string or base64")
 
     # Google Gemini AI Inference
     gemini_api_key: Optional[str] = Field(default=None, description="Google Gemini API key")
@@ -148,10 +154,20 @@ class Settings(BaseSettings):
         return db_path
 
     def get_cors_origins(self) -> List[str]:
-        """Returns parsed list of allowed CORS origins."""
+        """Returns parsed list of allowed CORS origins, formatting scheme-less hosts (e.g. from Render property: host)."""
         if not self.cors_allowed_origins:
             return ["*"]
-        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+        origins: List[str] = []
+        for o in self.cors_allowed_origins.split(","):
+            cleaned = o.strip()
+            if not cleaned:
+                continue
+            origins.append(cleaned)
+            # If origin was provided as a bare host without scheme (e.g., from Render property: host)
+            if not cleaned.startswith("http://") and not cleaned.startswith("https://") and cleaned != "*":
+                origins.append(f"https://{cleaned}")
+                origins.append(f"http://{cleaned}")
+        return list(dict.fromkeys(origins))
 
 
 @lru_cache()

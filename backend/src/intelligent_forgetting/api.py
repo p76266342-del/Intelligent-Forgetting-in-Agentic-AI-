@@ -68,7 +68,7 @@ from intelligent_forgetting.vector_store import QdrantVectorService
 logger = logging.getLogger("intelligent_forgetting.api")
 
 settings = get_settings()
-store = MemoryStore(db_path=settings.database_path)
+store = MemoryStore(db_path=settings.database_path, database_url=settings.database_url)
 scorer = MemoryScorer(settings=settings)
 vector_service = QdrantVectorService(settings=settings)
 firestore_service = FirestoreChatService(settings=settings)
@@ -156,6 +156,7 @@ def resolve_user_optional(
 # ==============================================================================
 
 @app.get("/health", tags=["System"])
+@app.get("/api/v1/health", tags=["System"])
 def health_check():
     """Service health verification endpoint."""
     firestore_health = firestore_service.is_healthy()
@@ -163,7 +164,9 @@ def health_check():
         "status": "healthy",
         "timestamp": utc_now().isoformat(),
         "services": {
-            "sqlite": True,
+            "database_backend": "postgresql" if store.is_postgres else "sqlite",
+            "sqlite": not store.is_postgres,
+            "postgresql": store.is_postgres,
             "qdrant": vector_service.is_healthy(),
             "gemini": gemini_service.is_live(),
             "firestore": firestore_health.get("healthy", False),
@@ -174,6 +177,7 @@ def health_check():
 
 
 @app.get("/health/ready", tags=["System"])
+@app.get("/api/v1/health/ready", tags=["System"])
 def readiness_check():
     """Service readiness verification for deployment orchestrators."""
     return {
@@ -206,6 +210,7 @@ def reconcile_qdrant_vectors(
 # ==============================================================================
 
 @app.get("/api/v1/me", response_model=UserRecord, tags=["Auth & Profile"])
+@app.get("/me", response_model=UserRecord, tags=["Auth & Profile"])
 def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)):
     """Retrieves current verified user profile, creating SQLite record if first login."""
     record = store.get_user(user.uid)
@@ -228,6 +233,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
 
 
 @app.patch("/api/v1/me/profile", response_model=UserRecord, tags=["Auth & Profile"])
+@app.patch("/me/profile", response_model=UserRecord, tags=["Auth & Profile"])
 def update_profile(
     payload: UserProfileUpdate,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -245,6 +251,7 @@ def update_profile(
 
 
 @app.delete("/api/v1/me", tags=["Auth & Profile"])
+@app.delete("/me", tags=["Auth & Profile"])
 def delete_account(user: AuthenticatedUser = Depends(get_current_user)):
     """Complete GDPR-compliant user account and data deletion workflow."""
     # 1. Cascade SQLite records

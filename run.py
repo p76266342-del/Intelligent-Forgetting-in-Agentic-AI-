@@ -123,8 +123,8 @@ Examples:
         choices=["api", "frontend", "dashboard", "test", "tests", "experiment", "admin-init"],
         help="Subsystem to execute",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="API host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8000, help="Port (default: 8000 for api, 3000 for frontend, 8501 for dashboard)")
+    parser.add_argument("--host", default=os.environ.get("API_HOST", "127.0.0.1"), help="API host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", os.environ.get("API_PORT", 8000))), help="Port (default: 8000 for api, 3000 for frontend, 8501 for dashboard)")
     parser.add_argument("--no-reload", action="store_true", help="Disable Uvicorn live reload")
     parser.add_argument("--uid", default="admin_user_init", help="User UID for admin-init")
     parser.add_argument("--email", default="", help="User email for admin-init")

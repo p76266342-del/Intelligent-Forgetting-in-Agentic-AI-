@@ -26,25 +26,253 @@ from intelligent_forgetting.models import (
 logger = logging.getLogger("intelligent_forgetting.memory_store")
 
 
-class MemoryStore:
-    """Thread-safe SQLite storage engine for multi-tenant agentic memory persistence."""
+class CompatCursor:
+    """Cursor wrapper that translates '?' placeholders to '%s' when executing against PostgreSQL."""
 
-    def __init__(self, db_path: str = "data/memories.db"):
+    def __init__(self, raw_cursor, is_postgres: bool = False):
+        self._cursor = raw_cursor
+        self._is_postgres = is_postgres
+
+    def execute(self, sql: str, params: Any = None):
+        if self._is_postgres and params is not None:
+            sql = sql.replace("?", "%s")
+        if params is not None:
+            return self._cursor.execute(sql, params)
+        return self._cursor.execute(sql)
+
+    def executemany(self, sql: str, seq_of_params: Any):
+        if self._is_postgres:
+            sql = sql.replace("?", "%s")
+        return self._cursor.executemany(sql, seq_of_params)
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size: Optional[int] = None):
+        return self._cursor.fetchmany(size) if size else self._cursor.fetchmany()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+
+class PGConnectionWrapper:
+    """PostgreSQL connection wrapper providing a consistent context manager interface."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return CompatCursor(self._conn.cursor(), is_postgres=True)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self._conn.rollback()
+        else:
+            self._conn.commit()
+        self._conn.close()
+
+
+class MemoryStore:
+    """Thread-safe SQLite & PostgreSQL storage engine for multi-tenant agentic memory persistence."""
+
+    def __init__(self, db_path: str = "data/memories.db", database_url: Optional[str] = None):
+        self.database_url = database_url
+        self.is_postgres = False
+        if self.database_url:
+            cleaned = self.database_url.strip()
+            if cleaned.startswith("postgres://") or cleaned.startswith("postgresql://"):
+                self.is_postgres = True
+                if cleaned.startswith("postgres://"):
+                    self.database_url = cleaned.replace("postgres://", "postgresql://", 1)
+                logger.info("MemoryStore initialized with PostgreSQL backend.")
+
         self.db_path = str(Path(db_path).resolve())
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        if not self.is_postgres:
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            logger.info("MemoryStore initialized with SQLite backend at %s", self.db_path)
+
         self._init_database()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Creates a SQLite connection with row factories and WAL mode enabled."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+    def _get_connection(self):
+        """Creates a database connection with dict/row factories."""
+        if self.is_postgres:
+            import psycopg2
+            from psycopg2.extras import DictCursor
+            conn = psycopg2.connect(self.database_url, cursor_factory=DictCursor)
+            return PGConnectionWrapper(conn)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return conn
+
+    def _init_postgres_database(self) -> None:
+        """Initializes PostgreSQL tables, indexes, and schema migrations."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL DEFAULT 'default_user',
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    category TEXT NOT NULL,
+                    memory_type TEXT NOT NULL,
+                    retention_status TEXT NOT NULL,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
+                    is_critical INTEGER NOT NULL DEFAULT 0,
+                    tags TEXT,
+                    metadata TEXT,
+                    retention_score REAL,
+                    score_breakdown TEXT,
+                    summary_of TEXT,
+                    qdrant_point_id TEXT
+                );
+                """
+            )
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'memories';")
+            columns = [row["column_name"] for row in cursor.fetchall()]
+            if "user_id" not in columns:
+                cursor.execute("ALTER TABLE memories ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default_user';")
+            if "qdrant_point_id" not in columns:
+                cursor.execute("ALTER TABLE memories ADD COLUMN qdrant_point_id TEXT;")
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    uid TEXT PRIMARY KEY,
+                    email TEXT,
+                    display_name TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    last_active_at TEXT NOT NULL,
+                    metadata TEXT
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
+                    model TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
+                    metadata TEXT
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    retrieved_memory_ids TEXT,
+                    metadata TEXT,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    user_id TEXT DEFAULT 'default_user',
+                    action TEXT NOT NULL,
+                    details TEXT
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_audit_log (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    actor_uid TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT,
+                    details TEXT
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rl_experiments (
+                    id TEXT PRIMARY KEY,
+                    policy_version TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    iterations INTEGER NOT NULL,
+                    mean_reward REAL NOT NULL,
+                    critical_retention_rate REAL NOT NULL,
+                    retrieval_success_rate REAL NOT NULL,
+                    storage_reduction_rate REAL NOT NULL,
+                    safety_violations INTEGER NOT NULL DEFAULT 0,
+                    baseline_comparison TEXT,
+                    parameters TEXT
+                );
+                """
+            )
+
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_status ON memories(user_id, retention_status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(retention_status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_last_accessed ON memories(last_accessed_at);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at ASC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_system_audit_actor ON system_audit_log(actor_uid);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memory_audit_user ON memory_audit_log(user_id, timestamp DESC);")
+            logger.info("PostgreSQL database tables and indexes initialized successfully.")
 
     def _init_database(self) -> None:
         """Initializes tables, indexes, and runs schema migrations if needed."""
+        if self.is_postgres:
+            self._init_postgres_database()
+            return
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 

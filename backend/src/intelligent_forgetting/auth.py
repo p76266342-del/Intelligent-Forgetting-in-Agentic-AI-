@@ -43,13 +43,34 @@ def initialize_firebase() -> bool:
             return True
 
         cred_path = settings.firebase_service_account_path
+        cred_json = settings.firebase_service_account_json
+        cert_data = None
+
         if cred_path and os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
+            cert_data = cred_path
+            logger.info("Loading Firebase credentials from file: %s", cred_path)
+        elif cred_json:
+            import json
+            import base64
+            cleaned_json = cred_json.strip()
+            # Support base64 encoded JSON if provided
+            if not cleaned_json.startswith("{") and not cleaned_json.endswith("}"):
+                try:
+                    cleaned_json = base64.b64decode(cleaned_json).decode("utf-8")
+                except Exception:
+                    pass
+            try:
+                cert_data = json.loads(cleaned_json)
+                logger.info("Loading Firebase credentials from environment variable")
+            except Exception as e:
+                logger.warning("Could not parse FIREBASE_SERVICE_ACCOUNT_JSON: %s", e)
+
+        if cert_data is not None:
+            cred = credentials.Certificate(cert_data)
             firebase_admin.initialize_app(cred, {
                 "projectId": settings.firebase_project_id,
                 "storageBucket": settings.firebase_storage_bucket,
             })
-            logger.info("Firebase Admin initialized with service account at %s", cred_path)
             _firebase_initialized = True
             return True
         else:

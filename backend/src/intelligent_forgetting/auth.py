@@ -42,28 +42,43 @@ def initialize_firebase() -> bool:
             _firebase_initialized = True
             return True
 
-        cred_path = settings.firebase_service_account_path
-        cred_json = settings.firebase_service_account_json
+        candidate_paths = [
+            settings.firebase_service_account_path,
+            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+            "/etc/secrets/firebase-service-account.json",
+            "/etc/secrets/firebase-credentials.json",
+            "credentials/firebase-service-account.json",
+        ]
         cert_data = None
+        for p in candidate_paths:
+            if p and os.path.exists(p):
+                cert_data = p
+                logger.info("Loading Firebase credentials from file: %s", p)
+                break
 
-        if cred_path and os.path.exists(cred_path):
-            cert_data = cred_path
-            logger.info("Loading Firebase credentials from file: %s", cred_path)
-        elif cred_json:
+        if cert_data is None and settings.firebase_service_account_json:
             import json
             import base64
-            cleaned_json = cred_json.strip()
-            # Support base64 encoded JSON if provided
+            cleaned_json = settings.firebase_service_account_json.strip()
+            # If wrapped in quotes, unwrap
+            if (cleaned_json.startswith('"') and cleaned_json.endswith('"')) or (cleaned_json.startswith("'") and cleaned_json.endswith("'")):
+                cleaned_json = cleaned_json[1:-1].strip()
+            # If base64 encoded
             if not cleaned_json.startswith("{") and not cleaned_json.endswith("}"):
                 try:
-                    cleaned_json = base64.b64decode(cleaned_json).decode("utf-8")
+                    cleaned_json = base64.b64decode(cleaned_json).decode("utf-8").strip()
                 except Exception:
                     pass
             try:
                 cert_data = json.loads(cleaned_json)
                 logger.info("Loading Firebase credentials from environment variable")
-            except Exception as e:
-                logger.warning("Could not parse FIREBASE_SERVICE_ACCOUNT_JSON: %s", e)
+            except Exception:
+                try:
+                    cleaned_json_unescaped = cleaned_json.encode('utf-8').decode('unicode_escape')
+                    cert_data = json.loads(cleaned_json_unescaped)
+                    logger.info("Loading Firebase credentials from unescaped environment variable")
+                except Exception as e:
+                    logger.warning("Could not parse FIREBASE_SERVICE_ACCOUNT_JSON: %s", e)
 
         if cert_data is not None:
             cred = credentials.Certificate(cert_data)

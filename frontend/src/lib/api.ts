@@ -186,7 +186,13 @@ export const getApiBaseUrl = (): string => {
     let url = process.env.NEXT_PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_URL;
     if (url) {
       url = url.trim().replace(/\/$/, '');
-      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      const bare = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      // Handle Render private service names (e.g. "intelligent-forgetting-backend" without TLD)
+      if (bare === 'intelligent-forgetting-backend' || bare.endsWith('.internal')) {
+        url = 'https://intelligent-forgetting-backend.onrender.com';
+      } else if (!bare.includes('.') && bare !== 'localhost' && bare !== '127.0.0.1') {
+        url = `https://${bare}.onrender.com`;
+      } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = `https://${url}`;
       }
       // If configured with trailing /api/v1 or /api, strip it so baseUrl is the pure host origin
@@ -196,6 +202,9 @@ export const getApiBaseUrl = (): string => {
   }
   // Client-side fallback if env vars missing in browser runtime
   if (typeof window !== 'undefined' && window.location) {
+    if (window.location.hostname.endsWith('.onrender.com')) {
+      return 'https://intelligent-forgetting-backend.onrender.com';
+    }
     if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
       return 'http://127.0.0.1:8000';
     }
@@ -288,8 +297,8 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
 
 export const api = {
   // System
-  getHealth: () => apiRequest<{ status: string; services: any }>('/health'),
-  getReadiness: () => apiRequest<{ status: string; ready: boolean }>('/health/ready'),
+  getHealth: () => apiRequest<{ status: string; services: any }>('/api/v1/health'),
+  getReadiness: () => apiRequest<{ status: string; ready: boolean }>('/api/v1/health/ready'),
 
   // Profile & Self
   getProfile: () => apiRequest<UserRecord>('/api/v1/me'),

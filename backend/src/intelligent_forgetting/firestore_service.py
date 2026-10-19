@@ -42,25 +42,30 @@ class FirestoreChatService:
                 logger.info("Firebase Admin not configured for live Firestore; offline/fallback mode active.")
                 self.client = None
                 self._is_active = False
+                self._fallback_reason = "Firebase Admin SDK initialization returned false (no service account credentials)"
                 return
 
             from firebase_admin import firestore
 
             self.client = firestore.client()
             self._is_active = True
+            self._fallback_reason = None
             logger.info("Cloud Firestore client initialized successfully for project: %s", self.settings.firebase_project_id)
         except Exception as e:
             # Mask sensitive details in log output
-            logger.warning("Cloud Firestore client initialization skipped or unavailable (%s). Fallback mode enabled.", type(e).__name__)
+            logger.warning("Cloud Firestore client initialization skipped or unavailable (%s: %s). Fallback mode enabled.", type(e).__name__, e)
             self.client = None
             self._is_active = False
+            self._fallback_reason = f"{type(e).__name__}: {str(e)}"
 
     def is_healthy(self) -> Dict[str, Any]:
         """Returns health and connection status of Cloud Firestore."""
+        is_conn = self._is_active and self.client is not None
         return {
-            "healthy": self._is_active and self.client is not None,
-            "status": "connected" if (self._is_active and self.client is not None) else "unconfigured_or_fallback",
+            "healthy": is_conn,
+            "status": "connected" if is_conn else "unconfigured_or_fallback",
             "project_id": self.settings.firebase_project_id,
+            "reason": None if is_conn else getattr(self, "_fallback_reason", "Service account credentials not provided"),
         }
 
     # ==========================================================================

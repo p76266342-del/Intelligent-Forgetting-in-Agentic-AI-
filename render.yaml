@@ -9,7 +9,7 @@ services:
     plan: free
     buildCommand: "pip install -r backend/requirements.txt && pip install -e backend"
     startCommand: "uvicorn intelligent_forgetting.api:app --host 0.0.0.0 --port $PORT"
-    healthCheckPath: /health
+    healthCheckPath: /api/v1/health
     envVars:
       - key: APP_ENV
         value: production
@@ -21,7 +21,7 @@ services:
         fromService:
           type: web
           name: intelligent-forgetting-frontend
-          property: host
+          envVarKey: RENDER_EXTERNAL_URL
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
@@ -62,12 +62,12 @@ services:
         fromService:
           type: web
           name: intelligent-forgetting-backend
-          property: host
+          envVarKey: RENDER_EXTERNAL_URL
       - key: NEXT_PUBLIC_API_BASE_URL
         fromService:
           type: web
           name: intelligent-forgetting-backend
-          property: host
+          envVarKey: RENDER_EXTERNAL_URL
       - key: NEXT_PUBLIC_FIREBASE_API_KEY
         sync: false
       - key: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
